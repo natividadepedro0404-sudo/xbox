@@ -4,16 +4,13 @@ require('dotenv').config();
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const port = process.env.PORT || 4000;
 
 const client = new Client();
 const checkedUsers = new Set();
 
-// Configurações automáticas
 let totalScanned = 0;
 let totalFound = 0;
 
-// Listas específicas para detecção Xbox
 const XBOX_GAMERTAG_PATTERNS = [
     /xbox/i,
     /xbl/i,
@@ -27,22 +24,8 @@ const XBOX_GAMERTAG_PATTERNS = [
     /\[xbl\]/i,
     /\(xbox\)/i,
     /\(xbl\)/i,
-    /xbox\s*\.\s*com/i,
     /xbox\s*gamer/i,
-    /microsoft\s*gamer/i,
-    /xbox\s*club/i,
-    /xbox\s*pass/i,
     /xbox\s*game\s*pass/i
-];
-
-const XBOX_GAMES = [
-    'Xbox Live',
-    'Xbox App',
-    'Xbox Game Pass',
-    'Xbox Cloud Gaming',
-    'Xbox Console Companion',
-    'Xbox Game Bar',
-    'Xbox Network'
 ];
 
 client.on('ready', async () => {
@@ -56,7 +39,6 @@ client.on('ready', async () => {
     console.log('\n🚀 INICIANDO SCAN AUTOMÁTICO...');
     console.log('='.repeat(60));
     
-    // Começar o scan imediatamente
     await startXboxScan();
 });
 
@@ -65,16 +47,18 @@ async function startXboxScan() {
     console.log('='.repeat(50));
     
     const guilds = client.guilds.cache;
-    const guildCount = guilds.size;
-    
-    console.log(`🔍 Escaneando ${guildCount} servidores...\n`);
     
     for (const [guildId, guild] of guilds) {
         try {
+            console.log(`\n📁 ${guild.name} (${guild.memberCount} membros)`);
+            console.log(`   🔍 Buscando membros...`);
+            
             const result = await scanGuild(guild);
-            console.log(`📊 ${guild.name}: ${result.scanned} membros | ${result.found} gamertags encontradas`);
+            
+            console.log(`   📊 Escaneados: ${result.scanned} | Gamertags: ${result.found}`);
+            
         } catch (error) {
-            console.error(`❌ Erro em ${guild.name}:`, error.message);
+            console.error(`   ❌ Erro em ${guild.name}:`, error.message);
         }
     }
     
@@ -83,8 +67,6 @@ async function startXboxScan() {
     console.log(`👥 Total escaneado: ${totalScanned} usuários`);
     console.log(`✅ Gamertags encontradas: ${totalFound}`);
     console.log('='.repeat(50));
-    console.log('\n📊 RESULTADOS ENVIADOS PARA O WEBHOOK');
-    console.log('='.repeat(50));
 }
 
 async function scanGuild(guild) {
@@ -92,13 +74,51 @@ async function scanGuild(guild) {
     let found = 0;
     
     try {
-        await guild.members.fetch();
+        // FORÇAR busca de TODOS os membros do servidor
+        console.log(`   ⏳ Carregando todos os ${guild.memberCount} membros...`);
+        
+        // Método 1: fetch com parâmetros específicos
+        await guild.members.fetch({
+            force: true,
+            cache: true,
+            limit: guild.memberCount // Tentar buscar todos
+        });
+        
+        // Método 2: Se o método 1 não pegar todos, buscar em lotes
+        if (guild.members.cache.size < guild.memberCount * 0.9) { // Se tiver menos de 90%
+            console.log(`   ⚠️  Busca inicial incompleta, tentando método alternativo...`);
+            
+            // Buscar membros online primeiro
+            await guild.members.fetch({ force: true, cache: true });
+            
+            // Buscar membros offline
+            for (let i = 0; i < 5; i++) {
+                await guild.members.fetch({
+                    force: true,
+                    cache: true,
+                    limit: 1000,
+                    after: [...guild.members.cache.keys()].pop()
+                });
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+        
+        const memberCount = guild.members.cache.size;
+        console.log(`   ✅ ${memberCount} membros carregados no cache`);
+        
+        let processed = 0;
         
         for (const [memberId, member] of guild.members.cache) {
             if (member.user.bot) continue;
             
+            processed++;
             scanned++;
             totalScanned++;
+            
+            // Mostrar progresso a cada 50 membros
+            if (processed % 50 === 0) {
+                console.log(`   📈 Progresso: ${processed}/${memberCount} membros`);
+            }
             
             // Pular se já foi verificado
             if (checkedUsers.has(memberId)) {
@@ -115,16 +135,67 @@ async function scanGuild(guild) {
                 
                 await sendGamertagInfo(member, guild, gamertag);
                 
-                // Pequena pausa para evitar rate limit
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                // Pausa para evitar rate limit
+                await new Promise(resolve => setTimeout(resolve, 1500));
             }
         }
         
         return { scanned, found };
         
     } catch (error) {
-        console.error(`Erro ao escanear ${guild.name}:`, error.message);
-        return { scanned: 0, found: 0 };
+        console.error(`   ❌ Erro ao escanear ${guild.name}:`, error.message);
+        
+        // Tentar método alternativo se falhar
+        try {
+            console.log(`   🔄 Tentando método alternativo...`);
+            
+            let altScanned = 0;
+            let altFound = 0;
+            
+            // Buscar membros em páginas
+            let lastId = null;
+            let hasMore = true;
+            let pageCount = 0;
+            
+            while (hasMore && pageCount < 10) {
+                const fetchOptions = { force: true, cache: true, limit: 1000 };
+                if (lastId) fetchOptions.after = lastId;
+                
+                const members = await guild.members.fetch(fetchOptions);
+                
+                for (const [memberId, member] of members) {
+                    if (member.user.bot) continue;
+                    
+                    altScanned++;
+                    totalScanned++;
+                    
+                    if (!checkedUsers.has(memberId)) {
+                        const gamertag = await checkForXboxGamertag(member);
+                        
+                        if (gamertag) {
+                            altFound++;
+                            totalFound++;
+                            checkedUsers.add(memberId);
+                            await sendGamertagInfo(member, guild, gamertag);
+                            await new Promise(resolve => setTimeout(resolve, 1500));
+                        }
+                    }
+                }
+                
+                lastId = members.last()?.id;
+                hasMore = members.size === 1000;
+                pageCount++;
+                
+                console.log(`   📄 Página ${pageCount}: +${members.size} membros`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            
+            return { scanned: altScanned, found: altFound };
+            
+        } catch (altError) {
+            console.error(`   ❌ Método alternativo também falhou:`, altError.message);
+            return { scanned: 0, found: 0 };
+        }
     }
 }
 
@@ -133,14 +204,14 @@ async function checkForXboxGamertag(member) {
     const username = user.username;
     const displayName = member.displayName;
     
-    // Verificar ambos: username e display name
+    // Verificar username e apelido
     const namesToCheck = [username];
     if (displayName && displayName !== username) {
         namesToCheck.push(displayName);
     }
     
     for (const name of namesToCheck) {
-        // 1. Verificar padrões específicos de Xbox
+        // Verificar padrões Xbox
         for (const pattern of XBOX_GAMERTAG_PATTERNS) {
             if (pattern.test(name)) {
                 return {
@@ -152,46 +223,33 @@ async function checkForXboxGamertag(member) {
             }
         }
         
-        // 2. Verificar formato de gamertag com prefixos/sufixos
-        const gamertagMatch = extractGamertagFromName(name);
-        if (gamertagMatch) {
+        // Verificar formato GT:
+        const gtMatch = name.match(/^(?:gt|gamertag)[:\s]+([A-Za-z0-9_]{3,20})$/i);
+        if (gtMatch) {
             return {
-                gamertag: gamertagMatch.gamertag,
-                type: gamertagMatch.type,
-                prefix: gamertagMatch.prefix,
+                gamertag: gtMatch[1],
+                type: 'gt_format',
                 source: name
             };
         }
-    }
-    
-    return null;
-}
-
-function extractGamertagFromName(name) {
-    // Padrões comuns de gamertags em nomes
-    const patterns = [
-        // GT: Gamertag
-        /^(?:gt|gamertag)[:\s]+([A-Za-z0-9_]{3,15})$/i,
-        // [GT] Gamertag
-        /^\[(?:gt|gamertag)\]\s*([A-Za-z0-9_]{3,15})$/i,
-        // (GT) Gamertag
-        /^\((?:gt|gamertag)\)\s*([A-Za-z0-9_]{3,15})$/i,
-        // Gamertag | GT
-        /^([A-Za-z0-9_]{3,15})\s*[|\-]\s*(?:gt|gamertag)$/i,
-        // Xbox: Gamertag
-        /^xbox[:\s]+([A-Za-z0-9_]{3,15})$/i,
-        // XBL: Gamertag
-        /^xbl[:\s]+([A-Za-z0-9_]{3,15})$/i,
-        // Gamertag (Xbox)
-        /^([A-Za-z0-9_]{3,15})\s*\((?:xbox|xbl)\)$/i
-    ];
-    
-    for (let i = 0; i < patterns.length; i++) {
-        const match = name.match(patterns[i]);
-        if (match) {
+        
+        // Verificar formato [Xbox] ou (Xbox)
+        const bracketMatch = name.match(/^[\[\(](?:xbox|xbl|gt)[\]\)]\s*([A-Za-z0-9_]{3,20})$/i);
+        if (bracketMatch) {
             return {
-                gamertag: match[1],
-                type: 'formatted_gamertag'
+                gamertag: bracketMatch[1],
+                type: 'bracket_format',
+                source: name
+            };
+        }
+        
+        // Verificar se termina com (Xbox) ou (XBL)
+        const suffixMatch = name.match(/^([A-Za-z0-9_]{3,20})\s*[\[\(](?:xbox|xbl)[\]\)]$/i);
+        if (suffixMatch) {
+            return {
+                gamertag: suffixMatch[1],
+                type: 'suffix_format',
+                source: name
             };
         }
     }
@@ -205,12 +263,10 @@ async function sendGamertagInfo(member, guild, gamertagInfo) {
     const userId = user.id;
     const avatarURL = user.displayAvatarURL({ dynamic: true, size: 1024 });
     
-    // Informações da conta
     const createdAt = user.createdAt ? user.createdAt.toLocaleDateString('pt-BR') : 'Desconhecido';
     const accountAge = Date.now() - user.createdAt.getTime();
     const accountAgeInYears = Math.floor(accountAge / (1000 * 60 * 60 * 24 * 365));
     
-    // Status
     const status = member.presence?.status || 'offline';
     const statusEmoji = {
         online: '🟢',
@@ -219,101 +275,50 @@ async function sendGamertagInfo(member, guild, gamertagInfo) {
         offline: '⚫'
     }[status] || '⚫';
     
-    console.log(`   🎮 ${gamertagInfo.gamertag} - ${gamertagInfo.type}`);
+    console.log(`      🎮 Gamertag: ${gamertagInfo.gamertag} (${gamertagInfo.type})`);
     
-    // Buscar banner
     let bannerURL = null;
     try {
         const fetchedUser = await client.users.fetch(userId, { force: true });
         if (fetchedUser.banner) {
             bannerURL = fetchedUser.bannerURL({ dynamic: true, size: 1024 });
         }
-    } catch (error) {
-        // Ignorar erros
-    }
+    } catch (error) {}
     
-    // Criar embed
     const embed = new MessageEmbed()
         .setColor('#107C10')
         .setTitle(`🎮 GAMERTAG XBOX DETECTADA 🎮`)
         .addFields([
-            { 
-                name: '👤 Nome de Usuário', 
-                value: `\`${username}\``,
-                inline: true 
-            },
-            { 
-                name: '🎮 Gamertag Detectada', 
-                value: `\`${gamertagInfo.gamertag}\``, 
-                inline: true 
-            },
-            { 
-                name: '🌐 Servidor', 
-                value: `\`${guild.name}\``, 
-                inline: true 
-            },
-            { 
-                name: `${statusEmoji} Status`, 
-                value: `\`${status}\``, 
-                inline: true 
-            },
-            { 
-                name: '📅 Conta Criada', 
-                value: `\`${createdAt}\` (\`${accountAgeInYears} anos\`)`, 
-                inline: true 
-            },
-            { 
-                name: '🆔 ID do Usuário', 
-                value: `\`${userId}\``, 
-                inline: true 
-            }
+            { name: '👤 Nome', value: `\`${username}\``, inline: true },
+            { name: '🎮 Gamertag', value: `\`${gamertagInfo.gamertag}\``, inline: true },
+            { name: '🌐 Servidor', value: `\`${guild.name}\``, inline: true },
+            { name: `${statusEmoji} Status`, value: `\`${status}\``, inline: true },
+            { name: '📅 Conta Criada', value: `\`${createdAt}\` (${accountAgeInYears} anos)`, inline: true },
+            { name: '🆔 ID', value: `\`${userId}\``, inline: true }
         ])
         .setThumbnail(avatarURL)
         .setTimestamp()
-        .setFooter(`ID: ${userId} | Scanner Automático`);
+        .setFooter(`ID: ${userId} | Scanner Auto`);
     
-    // Adicionar banner
-    if (bannerURL) {
-        embed.setImage(bannerURL);
-    }
+    if (bannerURL) embed.setImage(bannerURL);
     
-    // Adicionar informações da detecção
-    embed.addField(
-        '🔍 Tipo de Detecção',
-        `\`${gamertagInfo.type}\``,
-        true
-    );
-    
-    if (gamertagInfo.keyword) {
-        embed.addField(
-            '🔤 Palavra-chave',
-            `\`${gamertagInfo.keyword}\``,
-            true
-        );
-    }
-    
-    // Adicionar estatísticas
-    embed.addField(
-        '📊 Estatísticas do Scan',
-        `Total escaneado: \`${totalScanned}\`\n` +
-        `Gamertags encontradas: \`${totalFound}\``,
-        false
-    );
+    embed.addField('🔍 Tipo', `\`${gamertagInfo.type}\``, true);
+    embed.addField('📊 Scan', `Encontrados: ${totalFound} | Total: ${totalScanned}`, true);
     
     const data = {
-        content: `🎮 **GAMERTAG XBOX DETECTADA: \`${gamertagInfo.gamertag}\`** 🎮`,
+        content: `🎮 **NOVA GAMERTAG XBOX: \`${gamertagInfo.gamertag}\`** 🎮`,
         embeds: [embed],
     };
     
     try {
         await axios.post(WEBHOOK_URL, data);
-        console.log(`       ✅ Webhook enviado: ${gamertagInfo.gamertag}`);
+        console.log(`         ✅ Webhook enviado`);
     } catch (error) {
-        console.error(`       ❌ Erro no webhook: ${error.message}`);
+        console.error(`         ❌ Erro webhook: ${error.message}`);
     }
 }
 
-// Iniciar o cliente
+// Login
 client.login(DISCORD_TOKEN);
 
 // Tratar encerramento
@@ -330,4 +335,3 @@ process.on('SIGINT', () => {
 process.on('unhandledRejection', error => {
     console.error('Erro ignorado:', error.message);
 });
-
