@@ -4,6 +4,7 @@ require('dotenv').config();
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const port = process.env.PORT || 4000;
 
 const client = new Client();
 const checkedUsers = new Set();
@@ -329,3 +330,4 @@ process.on('SIGINT', () => {
 process.on('unhandledRejection', error => {
     console.error('Erro ignorado:', error.message);
 });
+
